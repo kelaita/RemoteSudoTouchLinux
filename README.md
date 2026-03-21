@@ -54,6 +54,20 @@ The built package is written to `dist/`.
 sudo dpkg -i dist/remote-sudo-touch_0.1.0_all.deb
 ```
 
+## Strong warning
+
+Editing `sudo` PAM files can break administrative access to the machine.
+
+Before changing `/etc/pam.d/sudo`:
+
+- keep an existing root shell open
+- make one change at a time
+- verify the helper works manually first
+- be prepared to revert the PAM change immediately if `sudo` stops working
+
+Do not blindly paste or automate PAM edits on a machine you cannot recover
+easily.
+
 ## Manual verification
 
 Before touching PAM, verify the helper itself:
