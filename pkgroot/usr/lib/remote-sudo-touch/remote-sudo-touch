@@ -1,0 +1,102 @@
+#!/bin/bash
+set -euo pipefail
+
+CONFIG_FILE=/etc/remote-sudo-touch/config.env
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1091
+  source "$CONFIG_FILE"
+fi
+
+PORT="${REMOTE_SUDO_TOUCH_PORT:-9876}"
+TIMEOUT_SECS="${REMOTE_SUDO_TOUCH_TIMEOUT:-30}"
+REQUEST_KIND="sudo_auth"
+
+usage() {
+  cat <<'MSG'
+Usage: remote-sudo-touch [--dry-run] [--print-request]
+
+Options:
+  --dry-run        Build and print the request payload without opening a socket.
+  --print-request  Same as --dry-run.
+MSG
+}
+
+DRY_RUN=0
+if [[ "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+elif [[ "${1:-}" == "--dry-run" || "${1:-}" == "--print-request" ]]; then
+  DRY_RUN=1
+elif [[ $# -gt 0 ]]; then
+  echo "remote-sudo-touch: unknown argument: $1" >&2
+  usage >&2
+  exit 1
+fi
+
+export REMOTE_SUDO_TOUCH_PORT="$PORT"
+export REMOTE_SUDO_TOUCH_TIMEOUT="$TIMEOUT_SECS"
+export REMOTE_SUDO_TOUCH_KIND="$REQUEST_KIND"
+export DRY_RUN="$DRY_RUN"
+
+exec python3 - <<'PY'
+import json
+import os
+import socket
+import sys
+import time
+import uuid
+
+port = int(os.environ.get("REMOTE_SUDO_TOUCH_PORT", "9876"))
+timeout_secs = int(os.environ.get("REMOTE_SUDO_TOUCH_TIMEOUT", "30"))
+request_kind = os.environ.get("REMOTE_SUDO_TOUCH_KIND", "sudo_auth")
+dry_run = os.environ.get("DRY_RUN", "0") == "1"
+
+request = {
+    "request_id": str(uuid.uuid4()),
+    "timestamp": int(time.time()),
+    "hostname": socket.gethostname(),
+    "user": os.environ.get("PAM_USER") or os.environ.get("USER") or "unknown",
+    "service": os.environ.get("PAM_SERVICE", "sudo"),
+    "tty": os.environ.get("PAM_TTY", ""),
+    "rhost": os.environ.get("PAM_RHOST", ""),
+    "type": request_kind,
+}
+
+if dry_run:
+    print(json.dumps(request, indent=2, sort_keys=True))
+    sys.exit(0)
+
+payload = (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
+
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout_secs) as sock:
+        sock.settimeout(timeout_secs)
+        sock.sendall(payload)
+        response = b""
+        while not response.endswith(b"\n"):
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            response += chunk
+except OSError as exc:
+    print(f"remote-sudo-touch: connection failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if not response:
+    print("remote-sudo-touch: empty response from RemoteSudoTouch agent", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    decoded = json.loads(response.decode("utf-8").strip())
+except Exception as exc:
+    print(f"remote-sudo-touch: invalid response: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+approved = bool(decoded.get("approved"))
+if approved:
+    sys.exit(0)
+
+reason = decoded.get("reason") or "denied"
+print(f"remote-sudo-touch: denied: {reason}", file=sys.stderr)
+sys.exit(1)
+PY

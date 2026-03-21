@@ -1,0 +1,7 @@
+#!/bin/bash
+set -euo pipefail
+
+cat <<'MSG'
+remote-sudo-touch is being removed.
+If you added the PAM snippet manually, remove it from /etc/pam.d/sudo too.
+MSG

@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+
+chmod 0755 /usr/lib/remote-sudo-touch/remote-sudo-touch || true
+chmod 0644 /etc/remote-sudo-touch/config.env || true
+
+cat <<'MSG'
+remote-sudo-touch installed.
+
+PAM integration is intentionally not auto-enabled.
+Review this snippet and add it to /etc/pam.d/sudo if desired:
+
+  auth sufficient pam_exec.so quiet /usr/lib/remote-sudo-touch/remote-sudo-touch
+
+Snippet file:
+  /usr/share/remote-sudo-touch/pam/sudo-snippet
+
+Before enabling PAM, confirm your reverse SSH tunnel is working and that
+localhost:9876 on Ubuntu reaches the Mac-side RemoteSudoTouch agent.
+MSG

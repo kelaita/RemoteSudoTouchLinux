@@ -1,0 +1,7 @@
+# RemoteSudoTouch sudo approval
+#
+# Add this near the top of /etc/pam.d/sudo, before the password-based auth line,
+# after you have verified the reverse tunnel path works.
+#
+# It returns success only when the Mac-side Touch ID approval succeeds.
+auth sufficient pam_exec.so quiet /usr/lib/remote-sudo-touch/remote-sudo-touch
