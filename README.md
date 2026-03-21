@@ -12,6 +12,12 @@ approval or denial response.
 The macOS manager app lives here:
 [RemoteSudoTouch](https://github.com/kelaita/RemoteSudoTouch)
 
+## Platform support
+
+This package has been tested on Ubuntu only.
+
+It may work on other Debian-based distributions, but that has not been verified.
+
 ## What this repo contains
 
 - `pkgroot/`: package payload and Debian control scripts
