@@ -9,6 +9,9 @@ to `127.0.0.1:<port>`, and a reverse SSH tunnel forwards that request to the
 macOS RemoteSudoTouch agent. The Mac prompts with Touch ID and returns an
 approval or denial response.
 
+The macOS manager app lives here:
+[RemoteSudoTouch](https://github.com/kelaita/RemoteSudoTouch)
+
 ## What this repo contains
 
 - `pkgroot/`: package payload and Debian control scripts
