@@ -49,7 +49,21 @@ installed:
 ```bash
 sudo apt-get update
 sudo apt-get install -y dpkg-dev fakeroot
-./scripts/build-deb.sh 0.1.0
+./scripts/build-deb.sh
+```
+
+Package version is read from the top-level `VERSION` file by default.
+
+Current version:
+
+```bash
+cat VERSION
+```
+
+If you need to override it for a one-off build:
+
+```bash
+./scripts/build-deb.sh 1.0.1
 ```
 
 The built package is written to `dist/`.
@@ -57,7 +71,7 @@ The built package is written to `dist/`.
 ## Install
 
 ```bash
-sudo dpkg -i dist/remote-sudo-touch_0.1.0_all.deb
+sudo dpkg -i dist/remote-sudo-touch_$(cat VERSION)_all.deb
 ```
 
 ## Strong warning
@@ -137,5 +151,6 @@ be provided by the reverse SSH tunnel.
 Typical release flow:
 
 1. Update the package contents under `pkgroot/`
-2. Build a new `.deb` with `./scripts/build-deb.sh <version>`
-3. Upload the artifact from `dist/` to a GitHub release or APT repository
+2. Update `VERSION` if needed
+3. Build a new `.deb` with `./scripts/build-deb.sh`
+4. Upload the artifact from `dist/` to a GitHub release or APT repository
