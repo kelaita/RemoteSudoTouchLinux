@@ -72,6 +72,8 @@ try:
     with socket.create_connection(("127.0.0.1", port), timeout=timeout_secs) as sock:
         sock.settimeout(timeout_secs)
         sock.sendall(payload)
+        # signal that the full request has been sent before waiting for the agent response.
+        sock.shutdown(socket.SHUT_WR)
         response = b""
         while not response.endswith(b"\n"):
             chunk = sock.recv(8192)
