@@ -129,10 +129,17 @@ Edit:
 Supported settings:
 
 - `REMOTE_SUDO_TOUCH_PORT=9876`
-- `REMOTE_SUDO_TOUCH_TIMEOUT=30`
+- `REMOTE_SUDO_TOUCH_CONNECT_TIMEOUT=2`
+- `REMOTE_SUDO_TOUCH_RESPONSE_TIMEOUT=15`
+- `REMOTE_SUDO_TOUCH_SELF_HEAL=1`
+- `REMOTE_SUDO_TOUCH_TIMEOUT=30` legacy setting that applies to both timeouts
 
 The helper always connects to `127.0.0.1`, so the transport path is expected to
 be provided by the reverse SSH tunnel.
+
+When `REMOTE_SUDO_TOUCH_SELF_HEAL=1`, the helper will try to clear a stale local
+reverse-forward listener on `127.0.0.1:<port>` if a request times out or returns
+an empty response, then retry once.
 
 ## Exit behavior
 
