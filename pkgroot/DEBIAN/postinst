@@ -2,19 +2,27 @@
 set -euo pipefail
 
 chmod 0755 /usr/lib/remote-sudo-touch/remote-sudo-touch || true
+chmod 0755 /usr/lib/remote-sudo-touch/remote-sudo-touch-bridge || true
+chmod 0755 /usr/sbin/remote-sudo-touch-setup || true
+chmod 0755 /usr/sbin/remote-sudo-touch-disable || true
 chmod 0644 /etc/remote-sudo-touch/config.env || true
+chmod 0644 /usr/share/remote-sudo-touch/pam/sudo-snippet || true
+chmod 0644 /usr/share/doc/remote-sudo-touch/README.md || true
+chmod 0644 /usr/lib/systemd/system/remote-sudo-touch.socket || true
+chmod 0644 /usr/lib/systemd/system/remote-sudo-touch@.service || true
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
 
 cat <<'MSG'
 remote-sudo-touch installed.
 
-PAM integration is intentionally not auto-enabled.
-Review this snippet and add it to /etc/pam.d/sudo if desired:
+Run the guided setup to enable the local bridge socket and managed PAM integration:
 
-  auth sufficient pam_exec.so quiet /usr/lib/remote-sudo-touch/remote-sudo-touch
+  sudo remote-sudo-touch-setup
 
-Snippet file:
-  /usr/share/remote-sudo-touch/pam/sudo-snippet
+To back it out later:
 
-Before enabling PAM, confirm your reverse SSH tunnel is working and that
-localhost:9876 on Ubuntu reaches the Mac-side RemoteSudoTouch agent.
+  sudo remote-sudo-touch-disable
 MSG

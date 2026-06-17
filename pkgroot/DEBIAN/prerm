@@ -3,5 +3,6 @@ set -euo pipefail
 
 cat <<'MSG'
 remote-sudo-touch is being removed.
-If you added the PAM snippet manually, remove it from /etc/pam.d/sudo too.
+Run 'sudo remote-sudo-touch-disable' first if you want to remove
+the managed PAM block and stop the local socket bridge cleanly.
 MSG

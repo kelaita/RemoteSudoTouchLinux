@@ -1,0 +1,13 @@
+[Unit]
+Description=RemoteSudoTouch local Unix socket
+
+[Socket]
+ListenStream=/run/remote-sudo-touch.sock
+SocketMode=0600
+SocketUser=root
+SocketGroup=root
+Accept=true
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

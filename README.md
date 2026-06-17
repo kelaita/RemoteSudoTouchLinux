@@ -5,9 +5,10 @@ RemoteSudoTouch system.
 
 It is intended for Ubuntu or other Debian-based hosts where `sudo` is wired
 through PAM. When `sudo` runs, `pam_exec` calls the helper, the helper connects
-to `127.0.0.1:<port>`, and a reverse SSH tunnel forwards that request to the
-macOS RemoteSudoTouch agent. The Mac prompts with Touch ID and returns an
-approval or denial response.
+to a root-owned Unix socket at `/run/remote-sudo-touch.sock`, and a
+socket-activated local bridge forwards that request through a reverse SSH
+tunnel on `127.0.0.1:9876` to the macOS RemoteSudoTouch agent. The Mac prompts
+with Touch ID and returns an approval or denial response.
 
 The macOS manager app lives here:
 [RemoteSudoTouch](https://github.com/kelaita/RemoteSudoTouch)
@@ -29,14 +30,20 @@ It may work on other Debian-based distributions, but that has not been verified.
 The package installs:
 
 - `/usr/lib/remote-sudo-touch/remote-sudo-touch`
+- `/usr/lib/remote-sudo-touch/remote-sudo-touch-bridge`
+- `/usr/sbin/remote-sudo-touch-setup`
+- `/usr/sbin/remote-sudo-touch-disable`
 - `/etc/remote-sudo-touch/config.env`
+- `/usr/lib/systemd/system/remote-sudo-touch.socket`
+- `/usr/lib/systemd/system/remote-sudo-touch@.service`
 - `/usr/share/remote-sudo-touch/pam/sudo-snippet`
 - `/usr/share/doc/remote-sudo-touch/README.md`
 
 ## Expected topology
 
-- The Linux helper connects to `127.0.0.1:9876`
-- A reverse SSH tunnel exposes that port on the Linux host
+- The Linux helper connects to `/run/remote-sudo-touch.sock`
+- A local socket-activated bridge connects to `127.0.0.1:9876`
+- A reverse SSH tunnel exposes that TCP port on the Linux host
 - The tunnel forwards traffic to the Mac at `127.0.0.1:8765`
 - The macOS `RemoteSudoTouchAgent` receives the JSON request and prompts with
   Touch ID
@@ -72,21 +79,19 @@ The built package is written to `dist/`.
 
 ```bash
 sudo dpkg -i dist/remote-sudo-touch_$(cat VERSION)_all.deb
+sudo remote-sudo-touch-setup
 ```
 
 ## Strong warning
 
 Editing `sudo` PAM files can break administrative access to the machine.
 
-Before changing `/etc/pam.d/sudo`:
+Before running `remote-sudo-touch-setup`:
 
 - keep an existing root shell open
-- make one change at a time
-- verify the helper works manually first
-- be prepared to revert the PAM change immediately if `sudo` stops working
-
-Do not blindly paste or automate PAM edits on a machine you cannot recover
-easily.
+- make sure the Mac side is already configured
+- make sure the reverse SSH tunnel is ready or can be started
+- be prepared to run `sudo remote-sudo-touch-disable` if you want to roll back
 
 ## Manual verification
 
@@ -98,25 +103,30 @@ sudo PAM_USER="$USER" PAM_SERVICE=sudo /usr/lib/remote-sudo-touch/remote-sudo-to
 ```
 
 The first command only prints the request payload. The second should succeed
-only if the reverse tunnel and the Mac agent are both reachable.
+only after the local socket bridge is enabled and the reverse tunnel and Mac
+agent are both reachable.
 
-## PAM integration
+## Setup and rollback
 
-After the manual helper test works, add the packaged snippet near the top of
-`/etc/pam.d/sudo`, before the password-based auth line:
+Run:
 
-```pam
-auth sufficient pam_exec.so quiet /usr/lib/remote-sudo-touch/remote-sudo-touch
+```bash
+sudo remote-sudo-touch-setup
 ```
 
-The packaged reference snippet is also installed at:
+The setup command:
 
-```text
-/usr/share/remote-sudo-touch/pam/sudo-snippet
+- enables `remote-sudo-touch.socket`
+- verifies `/run/remote-sudo-touch.sock`
+- performs an end-to-end `health_check` through the bridge and tunnel
+- inserts a managed PAM block into `/etc/pam.d/sudo`
+- saves a backup under `/var/lib/remote-sudo-touch/backups/`
+
+To disable it and remove the managed PAM block:
+
+```bash
+sudo remote-sudo-touch-disable
 ```
-
-Keep a root shell open while testing PAM changes so you do not lock yourself out
-of administrative access.
 
 ## Configuration
 
@@ -128,18 +138,20 @@ Edit:
 
 Supported settings:
 
-- `REMOTE_SUDO_TOUCH_PORT=9876`
+- `REMOTE_SUDO_TOUCH_SOCKET=/run/remote-sudo-touch.sock`
+- `REMOTE_SUDO_TOUCH_TUNNEL_HOST=127.0.0.1`
+- `REMOTE_SUDO_TOUCH_TUNNEL_PORT=9876`
 - `REMOTE_SUDO_TOUCH_CONNECT_TIMEOUT=2`
 - `REMOTE_SUDO_TOUCH_RESPONSE_TIMEOUT=15`
 - `REMOTE_SUDO_TOUCH_SELF_HEAL=1`
 - `REMOTE_SUDO_TOUCH_TIMEOUT=30` legacy setting that applies to both timeouts
 
-The helper always connects to `127.0.0.1`, so the transport path is expected to
-be provided by the reverse SSH tunnel.
+The helper connects to the Unix socket in `/run`. The local bridge behind that
+socket connects to the reverse SSH tunnel endpoint on `127.0.0.1:<port>`.
 
-When `REMOTE_SUDO_TOUCH_SELF_HEAL=1`, the helper will try to clear a stale local
-reverse-forward listener on `127.0.0.1:<port>` if a request times out or returns
-an empty response, then retry once.
+When `REMOTE_SUDO_TOUCH_SELF_HEAL=1`, the local bridge will try to clear a
+stale reverse-forward listener on `127.0.0.1:<port>` if a request times out or
+returns an empty response, then retry once.
 
 ## Exit behavior
 
@@ -148,7 +160,6 @@ an empty response, then retry once.
 
 ## Notes
 
-- This package does not auto-edit `/etc/pam.d/sudo`
 - This package does not create the reverse SSH tunnel
 - The macOS side must already be configured and running through the
   RemoteSudoTouch app

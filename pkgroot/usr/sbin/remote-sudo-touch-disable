@@ -1,0 +1,55 @@
+#!/bin/bash
+set -euo pipefail
+
+PAM_FILE=/etc/pam.d/sudo
+BEGIN_MARKER='# BEGIN RemoteSudoTouch'
+END_MARKER='# END RemoteSudoTouch'
+STATE_FILE=/var/lib/remote-sudo-touch/state.json
+SOCKET_UNIT=remote-sudo-touch.socket
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "remote-sudo-touch-disable: run as root" >&2
+  exit 1
+fi
+
+if grep -Fq "$BEGIN_MARKER" "$PAM_FILE"; then
+  python3 - "$PAM_FILE" "$BEGIN_MARKER" "$END_MARKER" <<'PY'
+import sys
+from pathlib import Path
+
+pam_path = Path(sys.argv[1])
+begin_marker = sys.argv[2]
+end_marker = sys.argv[3]
+lines = pam_path.read_text(encoding="utf-8").splitlines()
+output = []
+inside = False
+for line in lines:
+    if line.strip() == begin_marker:
+        inside = True
+        continue
+    if line.strip() == end_marker:
+        inside = False
+        continue
+    if not inside:
+        output.append(line)
+pam_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+PY
+  echo "Removed managed PAM block from $PAM_FILE"
+else
+  echo "No managed PAM block present in $PAM_FILE"
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now "$SOCKET_UNIT" >/dev/null 2>&1 || true
+  systemctl daemon-reload || true
+  echo "Stopped and disabled $SOCKET_UNIT"
+fi
+
+rm -f "$STATE_FILE"
+
+cat <<'MSG'
+RemoteSudoTouch has been disabled.
+
+To re-enable it later:
+  sudo remote-sudo-touch-setup
+MSG

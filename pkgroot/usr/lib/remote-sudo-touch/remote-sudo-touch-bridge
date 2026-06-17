@@ -1,0 +1,160 @@
+#!/bin/bash
+set -euo pipefail
+
+CONFIG_FILE=/etc/remote-sudo-touch/config.env
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1091
+  source "$CONFIG_FILE"
+fi
+
+TUNNEL_HOST="${REMOTE_SUDO_TOUCH_TUNNEL_HOST:-127.0.0.1}"
+TUNNEL_PORT="${REMOTE_SUDO_TOUCH_TUNNEL_PORT:-9876}"
+LEGACY_TIMEOUT_SECS="${REMOTE_SUDO_TOUCH_TIMEOUT:-}"
+CONNECT_TIMEOUT_SECS="${REMOTE_SUDO_TOUCH_CONNECT_TIMEOUT:-${LEGACY_TIMEOUT_SECS:-2}}"
+RESPONSE_TIMEOUT_SECS="${REMOTE_SUDO_TOUCH_RESPONSE_TIMEOUT:-${LEGACY_TIMEOUT_SECS:-15}}"
+SELF_HEAL_ENABLED="${REMOTE_SUDO_TOUCH_SELF_HEAL:-1}"
+
+export REMOTE_SUDO_TOUCH_TUNNEL_HOST="$TUNNEL_HOST"
+export REMOTE_SUDO_TOUCH_TUNNEL_PORT="$TUNNEL_PORT"
+export REMOTE_SUDO_TOUCH_CONNECT_TIMEOUT="$CONNECT_TIMEOUT_SECS"
+export REMOTE_SUDO_TOUCH_RESPONSE_TIMEOUT="$RESPONSE_TIMEOUT_SECS"
+export REMOTE_SUDO_TOUCH_SELF_HEAL="$SELF_HEAL_ENABLED"
+
+exec python3 /dev/fd/3 3<<'PY'
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+tunnel_host = os.environ.get("REMOTE_SUDO_TOUCH_TUNNEL_HOST", "127.0.0.1")
+tunnel_port = int(os.environ.get("REMOTE_SUDO_TOUCH_TUNNEL_PORT", "9876"))
+connect_timeout_secs = int(os.environ.get("REMOTE_SUDO_TOUCH_CONNECT_TIMEOUT", "2"))
+response_timeout_secs = int(os.environ.get("REMOTE_SUDO_TOUCH_RESPONSE_TIMEOUT", "15"))
+self_heal_enabled = os.environ.get("REMOTE_SUDO_TOUCH_SELF_HEAL", "1") != "0"
+
+request = sys.stdin.buffer.read()
+if not request:
+    sys.exit(1)
+
+def listener_pids_for_port(target_port: int) -> list[int]:
+    try:
+        lines = Path("/proc/net/tcp").read_text(encoding="utf-8").splitlines()[1:]
+    except OSError:
+        return []
+
+    target_suffix = f":{target_port:04X}"
+    inodes: set[str] = set()
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 10:
+            continue
+        if parts[1].endswith(target_suffix) and parts[3] == "0A":
+            inodes.add(parts[9])
+
+    pids: set[int] = set()
+    for proc_dir in Path("/proc").iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        fd_dir = proc_dir / "fd"
+        if not fd_dir.exists():
+            continue
+        try:
+            for fd in fd_dir.iterdir():
+                try:
+                    link_target = os.readlink(fd)
+                except OSError:
+                    continue
+                if link_target.startswith("socket:[") and link_target[8:-1] in inodes:
+                    pids.add(int(proc_dir.name))
+                    break
+        except OSError:
+            continue
+
+    return sorted(pids)
+
+def pid_command(pid: int) -> str:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        command = raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        if command:
+            return command
+    except OSError:
+        pass
+    try:
+        return Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+def is_stale_tunnel_owner(pid: int) -> bool:
+    lowered = pid_command(pid).lower()
+    return (
+        lowered.startswith("sshd:")
+        or lowered == "sshd"
+        or "/sshd" in lowered
+        or "ssh -n" in lowered
+        or "ssh -nt" in lowered
+        or "ssh -n " in lowered
+    )
+
+def kill_stale_listener(target_port: int) -> bool:
+    candidates = [pid for pid in listener_pids_for_port(target_port) if is_stale_tunnel_owner(pid)]
+    if not candidates:
+        return False
+
+    for pid in candidates:
+        try:
+            os.kill(pid, 15)
+        except (ProcessLookupError, PermissionError):
+            continue
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        remaining = [pid for pid in candidates if Path(f"/proc/{pid}").exists()]
+        if not remaining:
+            break
+        time.sleep(0.1)
+
+    for pid in candidates:
+        if Path(f"/proc/{pid}").exists():
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+
+    print(
+        f"remote-sudo-touch-bridge: cleared stale reverse tunnel listener on {tunnel_host}:{target_port}",
+        file=sys.stderr,
+    )
+    return True
+
+def request_via_tunnel() -> bytes:
+    with socket.create_connection((tunnel_host, tunnel_port), timeout=connect_timeout_secs) as sock:
+        sock.settimeout(response_timeout_secs)
+        sock.sendall(request)
+        sock.shutdown(socket.SHUT_WR)
+        response_data = b""
+        while not response_data.endswith(b"\n"):
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            response_data += chunk
+        return response_data
+
+response = b""
+for attempt in range(2):
+    try:
+        response = request_via_tunnel()
+        if response:
+            break
+        raise RuntimeError("empty response from RemoteSudoTouch agent")
+    except (OSError, RuntimeError) as exc:
+        if attempt == 0 and self_heal_enabled and kill_stale_listener(tunnel_port):
+            time.sleep(1.0)
+            continue
+        print(f"remote-sudo-touch-bridge: tunnel connection failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+sys.stdout.buffer.write(response)
+sys.stdout.buffer.flush()
+PY

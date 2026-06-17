@@ -1,0 +1,18 @@
+[Unit]
+Description=RemoteSudoTouch bridge connection handler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/remote-sudo-touch/remote-sudo-touch-bridge
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

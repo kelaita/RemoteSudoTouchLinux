@@ -4,9 +4,9 @@ Section: admin
 Priority: optional
 Architecture: all
 Maintainer: Paul Kelaita
-Depends: bash, python3
+Depends: bash, python3, systemd
 Recommends: openssh-client
 Description: RemoteSudoTouch PAM helper for approving sudo via a Mac Touch ID bridge
- Installs the Ubuntu-side PAM helper that connects to localhost:9876,
- where a reverse SSH tunnel forwards requests to the macOS RemoteSudoTouch
+ Installs the Ubuntu-side PAM helper, a socket-activated local bridge,
+ and guided setup tooling for approving sudo via the macOS RemoteSudoTouch
  agent running behind Touch ID.

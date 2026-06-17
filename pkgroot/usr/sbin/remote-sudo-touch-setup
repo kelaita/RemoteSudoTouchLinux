@@ -1,0 +1,180 @@
+#!/bin/bash
+set -euo pipefail
+
+STATE_DIR=/var/lib/remote-sudo-touch
+BACKUP_DIR="$STATE_DIR/backups"
+STATE_FILE="$STATE_DIR/state.json"
+PAM_FILE=/etc/pam.d/sudo
+CONFIG_FILE=/etc/remote-sudo-touch/config.env
+PAM_SNIPPET='auth sufficient pam_exec.so quiet seteuid /usr/lib/remote-sudo-touch/remote-sudo-touch'
+BEGIN_MARKER='# BEGIN RemoteSudoTouch'
+END_MARKER='# END RemoteSudoTouch'
+SOCKET_UNIT=remote-sudo-touch.socket
+DEFAULT_SOCKET_PATH=/run/remote-sudo-touch.sock
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1091
+  source "$CONFIG_FILE"
+fi
+
+SOCKET_PATH="${REMOTE_SUDO_TOUCH_SOCKET:-$DEFAULT_SOCKET_PATH}"
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "remote-sudo-touch-setup: run as root" >&2
+  exit 1
+fi
+
+status() {
+  echo "[$1] $2"
+}
+
+rollback_pam=0
+backup_path=""
+
+cleanup_on_error() {
+  local exit_code=$?
+  if [[ $exit_code -ne 0 && $rollback_pam -eq 1 && -n "$backup_path" && -f "$backup_path" ]]; then
+    cp "$backup_path" "$PAM_FILE"
+    echo "remote-sudo-touch-setup: restored $PAM_FILE from $backup_path after failure" >&2
+  fi
+  exit "$exit_code"
+}
+trap cleanup_on_error EXIT
+
+command -v systemctl >/dev/null 2>&1 || { echo "systemctl is required" >&2; exit 1; }
+mkdir -p "$BACKUP_DIR"
+
+status 1/7 "Verifying installed files"
+for file in \
+  /usr/lib/remote-sudo-touch/remote-sudo-touch \
+  /usr/lib/remote-sudo-touch/remote-sudo-touch-bridge \
+  "$CONFIG_FILE" \
+  /usr/lib/systemd/system/remote-sudo-touch.socket \
+  /usr/lib/systemd/system/remote-sudo-touch@.service
+do
+  [[ -e "$file" ]] || { echo "missing required file: $file" >&2; exit 1; }
+done
+
+if [[ "$SOCKET_PATH" != "$DEFAULT_SOCKET_PATH" ]]; then
+  echo "Configured socket path $SOCKET_PATH does not match packaged socket unit path $DEFAULT_SOCKET_PATH" >&2
+  echo "Either restore REMOTE_SUDO_TOUCH_SOCKET in $CONFIG_FILE or customize the systemd socket unit to match." >&2
+  exit 1
+fi
+
+status 2/7 "Enabling systemd socket"
+systemctl daemon-reload
+systemctl enable --now "$SOCKET_UNIT"
+
+status 3/7 "Verifying socket permissions"
+for _ in 1 2 3 4 5; do
+  [[ -S "$SOCKET_PATH" ]] && break
+  sleep 0.2
+done
+[[ -S "$SOCKET_PATH" ]] || { echo "socket not created at $SOCKET_PATH" >&2; exit 1; }
+socket_mode="$(stat -c '%a' "$SOCKET_PATH")"
+[[ "$socket_mode" == "600" ]] || { echo "socket permissions should be 600, found $socket_mode" >&2; exit 1; }
+
+status 4/7 "Testing end-to-end bridge health"
+python3 - "$SOCKET_PATH" <<'PY'
+import json
+import socket
+import sys
+
+sock_path = sys.argv[1]
+payload = {
+    "request_id": "setup-health-check",
+    "timestamp": 0,
+    "hostname": "setup",
+    "user": "health",
+    "service": "remote-sudo-touch",
+    "tty": "",
+    "rhost": "",
+    "type": "health_check",
+}
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.settimeout(5)
+    sock.connect(sock_path)
+    sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+    sock.shutdown(socket.SHUT_WR)
+    response = b""
+    while not response.endswith(b"\n"):
+        chunk = sock.recv(8192)
+        if not chunk:
+            break
+        response += chunk
+
+decoded = json.loads(response.decode("utf-8").strip())
+if not decoded.get("approved"):
+    raise SystemExit("health check was denied")
+PY
+
+status 5/7 "Inspecting PAM configuration"
+touch "$PAM_FILE"
+if grep -Fq "$BEGIN_MARKER" "$PAM_FILE"; then
+  echo "managed PAM block already present"
+else
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_path="$BACKUP_DIR/sudo.$timestamp.bak"
+  cp "$PAM_FILE" "$backup_path"
+  python3 - "$PAM_FILE" "$BEGIN_MARKER" "$PAM_SNIPPET" "$END_MARKER" <<'PY'
+import sys
+from pathlib import Path
+
+pam_path = Path(sys.argv[1])
+begin_marker = sys.argv[2]
+snippet = sys.argv[3]
+end_marker = sys.argv[4]
+lines = pam_path.read_text(encoding="utf-8").splitlines()
+insert_index = None
+for idx, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped.startswith("@include common-auth") or stripped.startswith("auth "):
+        insert_index = idx
+        break
+if insert_index is None:
+    raise SystemExit("could not find a safe insertion point in /etc/pam.d/sudo")
+lines[insert_index:insert_index] = [begin_marker, snippet, end_marker]
+pam_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+  rollback_pam=1
+fi
+
+status 6/7 "Writing setup state"
+python3 - "$STATE_FILE" "$backup_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+backup_path = sys.argv[2]
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state = {
+    "pamManaged": True,
+    "pamBackupPath": backup_path or None,
+    "socketEnabled": True,
+}
+state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+status 7/7 "Final verification"
+grep -Fq "$PAM_SNIPPET" "$PAM_FILE" || { echo "managed PAM snippet missing after setup" >&2; exit 1; }
+rollback_pam=0
+
+cat <<MSG
+
+RemoteSudoTouch setup complete.
+
+Changed:
+- enabled $SOCKET_UNIT
+- verified bridge socket at $SOCKET_PATH
+- installed managed PAM block in $PAM_FILE
+$( [[ -n "$backup_path" ]] && echo "- backup saved to $backup_path" )
+
+Next test:
+  sudo -k
+  sudo date
+
+Rollback:
+  sudo remote-sudo-touch-disable
+MSG
